@@ -2129,20 +2129,22 @@ HloInstruction* HloParserImpl::CreateInstruction(  // NOLINT
       // previous async op.
       if (opcode == HloOpcode::kAsyncUpdate ||
           opcode == HloOpcode::kAsyncDone) {
-        if (operands.size() != 1 || !operands[0]->IsAsynchronous() ||
-            operands[0]->opcode() == HloOpcode::kAsyncDone) {
-          TokenError(
-              "AsyncUpdate and AsyncDone expect a single async op as their "
-              "operand.");
+        if (operands.empty()) {
+          TokenError("No operand found for AsyncUpdate and AsyncDone");
           return nullptr;
         }
-      }
-      // For AsyncUpdate, the operand and the result should have the same shape.
-      if (opcode == HloOpcode::kAsyncUpdate) {
-        if (operands[0]->shape() != *shape) {
+
+        if (!operands[0]->IsAsynchronous()) {
           TokenError(
-              "AsyncUpdate expects the op shape to be the same as the operand "
-              "shape.");
+              "AsyncUpdate and AsyncDone expect their first operand to be an "
+              "async op.");
+          return nullptr;
+        }
+
+        if (operands[0]->opcode() == HloOpcode::kAsyncDone) {
+          TokenError(
+              "AsyncDone cannot be the first operand of AsyncUpdate or "
+              "AsyncDone.");
           return nullptr;
         }
       }
@@ -2250,7 +2252,7 @@ HloInstruction* HloParserImpl::CreateInstruction(  // NOLINT
       }
       if (opcode == HloOpcode::kAsyncUpdate) {
         return builder->AddInstruction(
-            HloInstruction::CreateAsyncUpdate(*shape, operands[0]));
+            HloInstruction::CreateAsyncUpdate(*shape, operands));
       }
       return builder->AddInstruction(
           HloInstruction::CreateAsyncDone(*shape, operands[0]));
