@@ -23,6 +23,7 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -88,13 +89,24 @@ absl::Status LogicalBufferAnalysis::Analyze() {
   return absl::OkStatus();
 }
 
-LogicalBuffer& LogicalBufferAnalysis::GetBuffer(LogicalBuffer::Id id) const {
-  return *logical_buffers_[id];
+absl::StatusOr<LogicalBuffer*> LogicalBufferAnalysis::GetBuffer(
+    LogicalBuffer::Id id) const {
+  if (id < 0 || id >= logical_buffers_.size()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid logical buffer ID: ", id));
+  }
+  return logical_buffers_[id].get();
 }
 
-LogicalBuffer& LogicalBufferAnalysis::GetBuffer(HloInstruction* instruction,
-                                                const ShapeIndex& index) const {
-  return *output_buffers_.at(std::make_pair(instruction, index));
+absl::StatusOr<LogicalBuffer*> LogicalBufferAnalysis::GetBuffer(
+    HloInstruction* instruction, const ShapeIndex& index) const {
+  auto it = output_buffers_.find(std::make_pair(instruction, index));
+  if (it == output_buffers_.end()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("No buffer defined by ", instruction->name(), " at index ",
+                     index.ToString()));
+  }
+  return it->second;
 }
 
 void LogicalBufferAnalysis::NewLogicalBuffer(HloInstruction* instruction,
@@ -246,6 +258,53 @@ absl::Status LogicalBufferAnalysis::HandleAsyncStart(
         }
       });
   return absl::OkStatus();
+}
+
+absl::Status LogicalBufferAnalysis::HandleAsyncUpdate(
+    HloInstruction* async_update) {
+  const Shape& async_update_shape = async_update->shape();
+  const HloInstruction* prev_async_op = async_update->operand(0);
+  const Shape& prev_async_op_shape = prev_async_op->shape();
+
+  HloInstruction* async_start =
+      Cast<HloAsyncInstruction>(async_update)->async_chain_start();
+  absl::flat_hash_set<ShapeIndex> explicitly_aliased_outputs;
+  for (const auto& pair : Cast<HloAsyncStartInstruction>(async_start)
+                              ->output_to_operand_aliasing()) {
+    explicitly_aliased_outputs.insert(pair.first);
+  }
+
+  ShapeUtil::ForEachSubshape(async_update_shape, [&](const Shape& new_subshape,
+                                                     const ShapeIndex& index) {
+    // Step 1: Check if compatible/forwarded from prev_async_op
+    if (!index.empty() && ShapeUtil::IndexIsValid(prev_async_op_shape, index)) {
+      const Shape& prev_subshape =
+          ShapeUtil::GetSubshape(prev_async_op_shape, index);
+      if (ShapeUtil::Compatible(prev_subshape, new_subshape)) {
+        return;
+      }
+    }
+
+    // Step 2: Check if operand input or explicit alias
+    if (index.size() >= 2 && index.front() == 0) {
+      // Input operand
+      return;
+    }
+    bool has_explicit_alias = explicitly_aliased_outputs.contains(index);
+    if (has_explicit_alias) {
+      return;
+    }
+
+    // Otherwise, new output or new tuple container
+    NewLogicalBuffer(async_update, index);
+  });
+
+  return absl::OkStatus();
+}
+
+absl::Status LogicalBufferAnalysis::HandleAsyncDone(
+    HloInstruction* async_done) {
+  return DefaultAction(async_done);
 }
 
 }  // namespace xla
